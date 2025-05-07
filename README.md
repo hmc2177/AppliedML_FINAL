@@ -1,2 +1,2 @@
 # AppliedML_FINAL
-Final Project for Applied Machine Learning Spring 2025
+This projects aims to reverse engineer Morgan Stanley Capital Management's (MSCI) ESG risk rating scores, to see if they can be inferred solely from publicly available information on the public companies. This involves the use of ESG word frequencies in annual reports, earnings call transcripts and news reports involving the company, as well as its fundamental financial data as would be found on platforms such as Bloomberg and Yahoo Finance. I performed exploratory data analysis using k-means clustering as well as experimenting with a regularized regression model and a random forest model. 
