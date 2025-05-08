@@ -70,6 +70,7 @@ message("Done! Saved ", nrow(df), " entries.")
 
 
 ```{r}
+#Scraping SEC filings for ESG words
 data <- read.csv("alpha_vantage_fundamentals.csv")
 tickers <- data$Symbol
 esg_keywords <- c('climate', 'emissions', 'carbon', 'environment', 'renewable', 'water usage', 'pollution', 'sustainable', 'biodiversity', 'waste management', 'oil', 'green', 'diversity', 'inclusion', 'social', 'ethics', 'human rights', 'equity', 'controversy', 'shareholder rights', 'community', 'fast fashion', 'reuse', 'recycle', 'donate', 'governance', 'compliance', 'executive compensation', 'hierarchy')
@@ -197,7 +198,7 @@ table(df$filing_type)
 
 
 ```{r}
-#Counting ESG words in alpha vantage files (earnigns call and news)
+#Counting ESG words in alpha vantage files (earnings call transcripts and news)
 tickers <- tickers[grepl("^[A-Za-z0-9]+$", tickers)]
 length(tickers)
 i <- 1
