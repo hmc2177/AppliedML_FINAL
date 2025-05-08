@@ -1,0 +1,326 @@
+---
+title: "Final Project - data import"
+author: "Hannah Carney"
+date: "2025-04-15"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rvest)
+library(dplyr)
+library(httr)
+library(jsonlite)
+library(readr)
+library(stringr)
+```
+
+```{r}
+#Getting ticker list 
+nasdaq_df <- read.delim("ftp://ftp.nasdaqtrader.com/SymbolDirectory/nasdaqlisted.txt", sep="|", header=TRUE)
+other_df <- read.delim("ftp://ftp.nasdaqtrader.com/SymbolDirectory/otherlisted.txt", sep="|", header=TRUE)
+colnames(other_df)[1:2] <- c("Symbol", "Security.Name")
+tickers <- bind_rows(
+  nasdaq_df[, c("Symbol", "Security.Name")],
+  other_df[, c("Symbol", "Security.Name")]
+)
+tickers <- tickers %>%
+  filter(!grepl("\\^|\\$", Symbol)) %>%  
+  mutate(Symbol = gsub("\\.", "-", Symbol))
+tickers <- tickers %>%
+  filter(!grepl("ETF|Fund|Note|Trust|Depositary", Security.Name, ignore.case = TRUE))
+```
+
+```{r}
+#Getting financial data
+tickers <-  tickers$Symbol
+api_key <- "WZ0TBJBO7E4Q4SXS"
+all_data <- list()
+for (i in seq_along(tickers)) {
+  ticker <- tickers[i]
+  url <- paste0("https://www.alphavantage.co/query?function=OVERVIEW&symbol=", ticker, "&apikey=", api_key)
+  
+  message("Fetching: ", ticker, " (", i, "/", length(tickers), ")")
+  tryCatch({
+    response <- GET(url)
+    if (status_code(response) == 200) {
+      content <- content(response, "text", encoding = "UTF-8")
+      data <- fromJSON(content)
+      if (!is.null(data$Symbol)) {
+        all_data[[length(all_data) + 1]] <- data
+      } else {
+        message("No data returned for: ", ticker)
+      }
+    } else {
+      message("Error for ", ticker, ": HTTP ", status_code(response))
+    }
+    Sys.sleep(0.8)
+  }, error = function(e) {
+    message("Error fetching ", ticker, ": ", e$message)
+    Sys.sleep(2)
+  })
+}
+
+df <- bind_rows(all_data)
+write.csv(df, "alpha_vantage_fundamentals.csv", row.names = FALSE)
+write_json(all_data, "alpha_vantage_fundamentals.json", pretty = TRUE)
+message("Done! Saved ", nrow(df), " entries.")
+```
+
+
+
+```{r}
+data <- read.csv("alpha_vantage_fundamentals.csv")
+tickers <- data$Symbol
+esg_keywords <- c('climate', 'emissions', 'carbon', 'environment', 'renewable', 'water usage', 'pollution', 'sustainable', 'biodiversity', 'waste management', 'oil', 'green', 'diversity', 'inclusion', 'social', 'ethics', 'human rights', 'equity', 'controversy', 'shareholder rights', 'community', 'fast fashion', 'reuse', 'recycle', 'donate', 'governance', 'compliance', 'executive compensation', 'hierarchy')
+filing_types <- c('10-K', '20-F', 'DEF 14A')
+
+user_agent <- 'Hannah Carney hmc2177@barnard.edu'
+#Ticker to CIK mapping
+sec_ticker_cik_url <- 'https://www.sec.gov/files/company_tickers.json'
+res <- GET(sec_ticker_cik_url, add_headers(`User-Agent` = user_agent))
+ticker_data <- fromJSON(content(res, "text"))
+
+ticker_to_cik <- sapply(ticker_data, function(x) sprintf("%010d", x$cik_str))
+names(ticker_to_cik) <- sapply(ticker_data, function(x) toupper(x$ticker))
+results <- list()
+for (ticker in tickers) {
+  cat("Processing", ticker, "...\n")
+  
+  lookup_ticker <- toupper(gsub("[-.]", "", ticker))
+  if (!(lookup_ticker %in% names(ticker_to_cik))) {
+    cat("No CIK found for", ticker, "\n")
+    result <- c(ticker = ticker, setNames(rep("NO_CIK", length(esg_keywords)), esg_keywords))
+    results[[length(results) + 1]] <- result
+    next
+  }
+  cik <- ticker_to_cik[[lookup_ticker]]
+  
+  if (is.null(cik)) {
+    cat("No CIK found for", ticker, "\n")
+    result <- c(ticker = ticker, filing_type = "NO_CIK", setNames(rep(NA, length(esg_keywords)), esg_keywords))
+    results[[length(results) + 1]] <- result
+    next
+  }
+  
+  sub_url <- paste0('https://data.sec.gov/submissions/CIK', cik, '.json')
+  sub_res <- GET(sub_url, add_headers(`User-Agent` = user_agent))
+  
+  if (status_code(sub_res) != 200) {
+    cat("Failed to fetch submissions for", ticker, "\n")
+    result <- c(ticker = ticker, filing_type = "NO_SUBMISSION", setNames(rep(NA, length(esg_keywords)), esg_keywords))
+    results[[length(results) + 1]] <- result
+    next
+  }
+  
+  submissions <- fromJSON(content(sub_res, "text"))
+  filings <- submissions$filings$recent
+  
+  found_filing <- FALSE
+  
+  # First check for '10-K' or '20-F' filings
+  for (i in seq_along(filings$form)) {
+    form <- filings$form[i]
+    
+    if (form %in% c('10-K', '20-F')) {
+      accession <- gsub("-", "", filings$accessionNumber[i])
+      primary_doc <- filings$primaryDocument[i]
+      
+      filing_url <- paste0('https://www.sec.gov/Archives/edgar/data/', as.numeric(cik), '/', accession, '/', primary_doc)
+      filing_res <- GET(filing_url, add_headers(`User-Agent` = user_agent))
+      
+      if (status_code(filing_res) != 200) {
+        cat("Failed to fetch filing document for", ticker, "\n")
+        next
+      }
+      
+      filing_text <- content(filing_res, "text", encoding = "UTF-8")
+      total_words <- length(strsplit(filing_text, "\\s+")[[1]])
+      counts <- sapply(esg_keywords, function(kw) str_count(tolower(filing_text), kw))
+      result <- c(ticker = ticker, filing_type = form, total_words = total_words, counts)
+      results[[length(results) + 1]] <- result
+      
+      cat("Found", form, "for", ticker, "\n")
+      found_filing <- TRUE
+      break  
+    }
+  }
+  if (!found_filing) {
+    for (i in seq_along(filings$form)) {
+      form <- filings$form[i]
+      if (form %in% filing_types) {
+        accession <- gsub("-", "", filings$accessionNumber[i])
+        primary_doc <- filings$primaryDocument[i]
+        
+        filing_url <- paste0('https://www.sec.gov/Archives/edgar/data/', as.numeric(cik), '/', accession, '/', primary_doc)
+        filing_res <- GET(filing_url, add_headers(`User-Agent` = user_agent))
+        
+        if (status_code(filing_res) != 200) {
+          cat("Failed to fetch filing document for", ticker, "\n")
+          next
+        }
+        
+        filing_text <- content(filing_res, "text", encoding = "UTF-8")
+        total_words <- length(strsplit(filing_text, "\\s+")[[1]])
+        # Count ESG keywords
+        counts <- sapply(esg_keywords, function(kw) str_count(tolower(filing_text), kw))
+        result <- c(ticker = ticker, filing_type = form, total_words = total_words, counts)
+        results[[length(results) + 1]] <- result
+        
+        cat("Found", form, "for", ticker, "\n")
+        found_filing <- TRUE
+        break  
+      }
+    }
+  }
+  
+  if (!found_filing) {
+    cat("No", paste(filing_types, collapse = "/"), "found for", ticker, "\n")
+    result <- c(ticker = ticker, filing_type = "NO_FILING", total_words = NA, setNames(rep(NA, length(esg_keywords)), esg_keywords))
+    results[[length(results) + 1]] <- result
+  }
+  
+  Sys.sleep(0.2)  
+}
+
+df <- bind_rows(results)
+write_csv(df, "esg_keyword_summary.csv")
+cat("Results saved to 'esg_keyword_summary.csv'\n")
+```
+
+```{r}
+df <- read.csv("esg_keyword_summary.csv")
+dim(df)
+table(df$filing_type)
+
+```
+
+
+```{r}
+#Counting ESG words in alpha vantage files (earnigns call and news)
+tickers <- tickers[grepl("^[A-Za-z0-9]+$", tickers)]
+length(tickers)
+i <- 1
+api_key <- "WZ0TBJBO7E4Q4SXS"
+news_base_url <- "https://www.alphavantage.co/query?function=NEWS_SENTIMENT&apikey="
+earnings_base_url <- "https://www.alphavantage.co/query?function=EARNINGS_CALL_TRANSCRIPT&apikey="
+
+esg_keywords <- c('climate', 'emissions', 'carbon', 'environment', 'renewable', 'water usage', 'pollution', 'sustainable', 'biodiversity', 'waste management', 'oil', 'green', 'diversity', 'inclusion', 'social', 'ethics', 'human rights', 'equity', 'controversy', 'shareholder rights', 'community', 'fast fashion', 'reuse', 'recycle', 'donate', 'governance', 'compliance', 'executive compensation', 'hierarchy')
+
+count_esg_keywords <- function(text, keywords) {
+  counts <- sapply(keywords, function(word) {
+    sum(str_count(tolower(text), regex(paste0("\\b", tolower(word), "\\b"))))
+  })
+  return(counts)
+}
+
+results_list <- list()
+
+for (ticker in tickers) {
+  news_url <- paste0(news_base_url, api_key, "&tickers=", ticker)
+  news_response <- GET(news_url)
+  cat(paste0("Processing ticker ", i, " of ", length(tickers), ": ", ticker, "\n"))
+  i = i+1
+  if (status_code(news_response) == 200) {
+    news_data <- fromJSON(content(news_response, "text"), flatten = TRUE)
+    if (!is.null(news_data$feed)) {
+      # Combine both title and summary if available
+      news_titles <- paste(news_data$feed$title, collapse = " ")
+      news_summaries <- paste(news_data$feed$summary, collapse = " ")
+      news_text <- paste(news_titles, news_summaries)
+    } else {
+      news_text <- ""
+    }
+  } else {
+    news_text <- ""
+    warning(paste("Failed to fetch news for", ticker))
+  }
+  earnings_url <- paste0(earnings_base_url, api_key, "&symbol=", ticker)
+  earnings_response <- GET(earnings_url)
+  
+  if (status_code(earnings_response) == 200) {
+    earnings_data <- fromJSON(content(earnings_response, "text"), flatten = TRUE)
+    if (!is.null(earnings_data$transcript)) {
+      # Combine all transcript content
+      earnings_text <- paste(earnings_data$transcript$content, collapse = " ")
+    } else {
+      earnings_text <- ""
+    }
+  } else {
+    earnings_text <- ""
+    warning(paste("Failed to fetch earnings transcript for", ticker))
+  }
+  
+  combined_text <- paste(news_text, earnings_text)
+  
+  esg_counts <- count_esg_keywords(combined_text, esg_keywords)
+  results_list[[ticker]] <- esg_counts
+  Sys.sleep(1)
+}
+final_df <- do.call(rbind, lapply(tickers, function(ticker) {
+  df_row <- as.data.frame(t(results_list[[ticker]]))
+  df_row$ticker <- ticker
+  df_row
+}))
+final_df <- final_df[, c("ticker", setdiff(colnames(final_df), "ticker"))]
+colnames(final_df) <- c("Ticker", esg_keywords)
+print(final_df)
+write.csv(final_df, "keywords_earnings_news.csv")
+```
+
+
+```{r}
+#Getting total word counts of earnings call and news summaries
+library(stringr)
+api_key <- "WZ0TBJBO7E4Q4SXS"
+news_base_url <- "https://www.alphavantage.co/query?function=NEWS_SENTIMENT&apikey="
+earnings_base_url <- "https://www.alphavantage.co/query?function=EARNINGS_CALL_TRANSCRIPT&apikey="
+
+word_counts <- data.frame(Ticker = character(), TotalWords = numeric(), stringsAsFactors = FALSE)
+
+for (i in seq_along(tickers)) {
+  ticker <- tickers[i]
+  cat(paste0("Processing ticker ", i, " of ", length(tickers), ": ", ticker, "\n"))
+  
+  news_url <- paste0(news_base_url, api_key, "&tickers=", ticker)
+  news_response <- GET(news_url)
+  
+  if (status_code(news_response) == 200) {
+    news_data <- fromJSON(content(news_response, "text"), flatten = TRUE)
+    if (!is.null(news_data$feed)) {
+      news_titles <- paste(news_data$feed$title, collapse = " ")
+      news_summaries <- paste(news_data$feed$summary, collapse = " ")
+      news_text <- paste(news_titles, news_summaries)
+    } else {
+      news_text <- ""
+    }
+  } else {
+    news_text <- ""
+    warning(paste("Failed to fetch news for", ticker))
+  }
+  
+  earnings_url <- paste0(earnings_base_url, api_key, "&symbol=", ticker)
+  earnings_response <- GET(earnings_url)
+  
+  if (status_code(earnings_response) == 200) {
+    earnings_data <- fromJSON(content(earnings_response, "text"), flatten = TRUE)
+    if (!is.null(earnings_data$transcript)) {
+      earnings_text <- paste(earnings_data$transcript$content, collapse = " ")
+    } else {
+      earnings_text <- ""
+    }
+  } else {
+    earnings_text <- ""
+    warning(paste("Failed to fetch earnings transcript for", ticker))
+  }
+  combined_text <- paste(news_text, earnings_text)
+  
+  total_words <- str_count(combined_text, boundary("word"))
+  word_counts <- rbind(word_counts, data.frame(Ticker = ticker, TotalWords = total_words))
+  
+  Sys.sleep(1)  
+}
+print(word_counts)
+write.csv(word_counts, "total_word_counts.csv", row.names = FALSE)
+```
+
