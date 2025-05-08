@@ -61,6 +61,7 @@ OVERALL_FLAG (discrete) – this is the second ordinal categorical variable, whi
 My second set of data comes from scraping text filings from public documents about the companies. I first sourced text files from the US Securities and Exchange Commission. I took a sample of tickers from the Nasdaq and other stock exchanges, and use these to scrape annual report filings for each company, and construct a dataset of the counts of predefined ESG-related words in each of the documents, as well as the total word count of each of the documents. I filtered down to only include 10-K and 20-F filings, as these are similar in structure and purpose, with 10-K annual reports being for US-based companies and 20-F filings for foreign-based companies listed on US stock exchanges. However, the two filing types have virtually the same purpose and content, so are reasonably comparable. 10-K filings are often longer and more detailed than 20-F filings, which is why I use word densities (word count/total filing word count) rather than absolute counts, which I go into more detail on later. The next text source I used was transcripts of earnings reports and news article titles and summaries, sourced from the financial markets data provider Alpha Vantage (via APIs). I searched by ticker for all news listed news article titles and summaries for that company, as well as the transcripts from their earnings reports (most of which came from Q4 of 2024) to shareholders, and obtained counts of the same ESG keywords I looked for in the SEC filings, as well as total words in the files I scraped. Finally, I combined all of these word counts into one dataset, got the ESG word counts across all documents and divided these by the total word counts of the documents scraped to get ESG word densities in public documents for each company. The word densities act as a measure of the extent to which each company mentions ESG factors in their public relations, and hence implies the extent to which they attempt to manage such risks.
 
 ```{r, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE}
+#Combining text data from SEC, Earnings Call Transcripts and News Sentiment
 df1 <- read_csv("esg_keyword_summary.csv")
 df2 <- read_csv("keywords_earnings_news.csv")
 df3 <- read_csv("total_word_counts.csv")
@@ -203,6 +204,7 @@ df <- df %>%
 ```
 
 ```{r, echo=FALSE}
+#Obtaining ESG ratings data from downloaded CSV file
 esg_ratings_raw <- read.csv("esg_ratings_factors.csv")
 esg_controversy_raw <- read.csv("controversy_factors.csv")
 esg_ratings <- esg_ratings_raw %>%
@@ -229,6 +231,7 @@ Final target variable = Industry Adjusted ESG Score (then mapped into letter rat
 
 
 ```{r, echo=FALSE}
+#Joining all data by ticker
 data <- df %>%
   inner_join(esg_data, by = c("Ticker" = "ISSUER_TICKER"))
 data <- data[complete.cases(data), ]
@@ -576,7 +579,7 @@ The purpose of this is to confirm the lack of signal in the data for predicting 
 Note the most common ESG risk rating group is 'Average' and the most common controversy flag is 'Green'.
 
 ```{r, echo=FALSE}
-#Distributions of ratings and flags
+#Distributions of ratings and flags in population
 data_summary <- data %>%
   mutate(
     Rating_Group = case_when(
@@ -660,6 +663,7 @@ Predictors with the highest importance found by the random forest model are more
 
 
 ```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#Partial dependence plots to reveal why certain variables are important predictors 
 par(mfrow=c(1, 2))
 pdp_revenue <- partial(
   object = rf_model,
@@ -716,7 +720,7 @@ When analysing the top 10 most important coefficients in my regularized regressi
 
 
 ```{r, echo=FALSE, message=FALSE, warning=FALSE}
-#Ridge and lasso on subset wihtout analyst ratings
+#Ridge and lasso on data subset without analyst ratings
 predictors_subset <- predictors_scaled %>%
   select(-c(AnalystRatingBuy, AnalystRatingHold, AnalystRatingSell, AnalystRatingStrongBuy, AnalystRatingStrongSell))
 set.seed(123)
