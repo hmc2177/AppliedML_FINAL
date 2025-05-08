@@ -1,0 +1,802 @@
+---
+title: "Applied Machine Learning Final Project"
+author: "Hannah Carney"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(dplyr)
+library(caret)
+library(VIM)
+library(readr)
+library(randomForest)
+library(tidyr)
+library(pdp)
+library(ggplot2)
+```
+
+# Introduction
+
+Individual and institutional equity investors are becoming increasingly concerned with the risks to their investments posed by environmental, social and governance (ESG) factors relating to the issuing companies. With increasing pressure on public companies to manage the risks of climate change, social responsibility and ethical governance, investors and asset managers’ clients are seeking so-called ‘sustainable’ investments, which will continue to grow and generate returns, while also mitigating the risks posed by ESG-related factors, which cannot be picked up by traditional financial risk models. To address this problem, platforms such as Morgan Stanley Capital International (MSCI) and Morningstar Sustainalytics have developed ESG risk scores, which supposedly measure the extent of ESG risk/opportunity attached to a stock, and these scores are increasingly being included in summary pages on Bloomberg and Yahoo Finance. These industry-adjusted scores supposedly inform investors on how ESG factors differentiate stocks from their peers, for example according to MSCI, “Pension funds, sovereign wealth funds, endowments and asset managers use our ratings as part of their investment processes for an informed understanding of risk and returns. Our ratings provide insight into how companies within a given industry compare with one another based on their exposure to, and management of, financially relevant, sustainability-related risks.” The problem at hand is that investors are unsure how these ratings are derived. There is a lack of transparency surrounding the variables considered by platforms such as MSCI when calculating ESG risk scores. In MSCI’s ESG risk methodologies report, the following description of how they calculate scores is given: 
+
+“Industry-Adjusted Company Score: This score is calculated by normalizing the Weighted Average Key Issue Score relative to the ESG Rating industry peer group, based on score ranges set by the benchmark values in the peer set. 
+Weighted Average Key Issue Score (WAKIS): This is calculated for each company based on the weighted average of the scores received on all the individual Environmental and Social Key Issues contributing to the rating of the company; and The Governance Pillar Score.”
+
+This description is vague, and their exact information sources are not disclosed. From a data-driven risk assessment point of view, investors may struggle to fully trust third-party quantitative and categorical measures of ESG risk if it’s unclear how these figures and categories are formed. This is particularly relevant in light of concerns over ‘greenwashing’, where companies claim, in communications with customers and public statements, to be more environmentally friendly than they are. Investors may wonder how much additional information the MSCI possesses on ESG risk that they cannot infer themselves from information that comes directly from companies themselves, as well as the stock’s performance and market sentiment.
+
+The aim of this project is to address whether public companies’ MSCI ESG ratings can be derived solely from publicly available information on that company, which can in turn reveal any biases in the scores, as well as their vulnerability to greenwashing. Through reverse engineering, I aimed to reveal which features of a company’s public information may lead to favourable scores, or if this cannot be revealed, does MSCI use more disclosed, less biased information to calculate its scores? For example, a company that talks a lot about ESG factors in its annual reports may be placing more of an emphasis on addressing ESG risks, but does this actually impact its score? Similarly, MSCI may tend to favour companies with certain financial characteristics, for example large cap companies that are more robust to risk in general, or they may look to news reports on companies to penalise those that have proven controversial in the ESG space. Investors need to be able to trust that the ESG risk scores they are using to evaluate investments are objective and unbiased, and reverse engineering MSCI’s ambiguous scores can reveal the most influential publicly available factors in MSCI’s ratings—or show that the scores rely on less transparent inputs.
+
+# Data Overview
+
+My data can be broken into three different sections, coming from multiple different sources. I attempted to acquire data for ~5600 stock tickers from the Nasdaq index and other indexes. I got a list of these tickers from ftp.nasdaqtrader.com.
+
+### Target Variable: 
+
+The first data source was the MSCI ESG risk ratings dataset, which I accessed through Columbia University Library’s datasets. This provided me with four differing industry-adjusted ESG risk measures as target variables:
+
+IVA_COMPANY_RATING (discrete) – this is an ordinal categorical rating, which has 7 distinct values (CCC, B, BB, BBB, A, AA, AAA) with CCC companies having the highest ESG risk and AAA companies the lowest. MSCI also groups these ratings into three broader categories based on ESG risk management, with CCC-b labelled ‘Laggards’, BB-A as ‘Average’ and AA-AAA as ‘Leaders’. The labels are derived from the industry adjusted score, detailed below.
+
+INDUSTRY_ADJUSTED_SCORE – this is a continuous score ranging from 1-10 that compares the company’s ESG performance relative to its industry peers. Higher scores indicate lower risk. The mapping from industry adjusted score to Letter Rating is shown below (source MSCI ESG ratings methodology)
+
+```{r, echo=FALSE}
+ratings_mapping_table <- data.frame(
+  "Letter Rating" = c("AAA", "AA", "A", "BBB", "BB", "B", "CCC"),
+  "Leader/Laggard" = c("Leader", "Leader", "Average", "Average", "Average", "Laggard", "Laggard"),
+  "Final Industry-Adjusted Company Score" = c("8.571* - 10.0", "7.143 – 8.571", "5.714 – 7.143", 
+                                              "4.286 – 5.714", "2.857 – 4.286", "1.429 – 2.857", "0.0 – 1.429")
+)
+
+kable(ratings_mapping_table, caption = "MSCI ESG Scores and Letter Ratings")
+```
+
+GOVERNANCE_SCORE (continuous) – this is a measure of firms’ governance practices, known as the ‘Governance Pillar Score’ (as mentioned in the problem description) It covers factors such as internal controls and management controversies. The individual governance score is not industry adjusted. I chose not to perform analyses on this measurement for my project as it is already incorporated into the overall industry adjusted ESG scores.
+
+OVERALL_FLAG (discrete) – this is the second ordinal categorical variable, which measures the company’s risk in terms of involvement in ESG controversies (for example news of poor labour practices, environmental damage, corrupt management) that may hinder consumer sentiment towards them. There are 4 levels: red, orange, yellow and green, with red being the most controversial and green the least.
+
+### Text Data:
+
+My second set of data comes from scraping text filings from public documents about the companies. I first sourced text files from the US Securities and Exchange Commission. I took a sample of tickers from the Nasdaq and other stock exchanges, and use these to scrape annual report filings for each company, and construct a dataset of the counts of predefined ESG-related words in each of the documents, as well as the total word count of each of the documents. I filtered down to only include 10-K and 20-F filings, as these are similar in structure and purpose, with 10-K annual reports being for US-based companies and 20-F filings for foreign-based companies listed on US stock exchanges. However, the two filing types have virtually the same purpose and content, so are reasonably comparable. 10-K filings are often longer and more detailed than 20-F filings, which is why I use word densities (word count/total filing word count) rather than absolute counts, which I go into more detail on later. The next text source I used was transcripts of earnings reports and news article titles and summaries, sourced from the financial markets data provider Alpha Vantage (via APIs). I searched by ticker for all news listed news article titles and summaries for that company, as well as the transcripts from their earnings reports (most of which came from Q4 of 2024) to shareholders, and obtained counts of the same ESG keywords I looked for in the SEC filings, as well as total words in the files I scraped. Finally, I combined all of these word counts into one dataset, got the ESG word counts across all documents and divided these by the total word counts of the documents scraped to get ESG word densities in public documents for each company. The word densities act as a measure of the extent to which each company mentions ESG factors in their public relations, and hence implies the extent to which they attempt to manage such risks.
+
+```{r, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE}
+df1 <- read_csv("esg_keyword_summary.csv")
+df2 <- read_csv("keywords_earnings_news.csv")
+df3 <- read_csv("total_word_counts.csv")
+df1_clean <- df1 %>%
+  filter(!filing_type %in% c("NO_FILING", "DEF 14A"))
+df1_clean <- df1_clean %>%
+  mutate(Ticker = toupper(ticker))
+
+df2 <- df2 %>%
+  mutate(Ticker = toupper(Ticker))
+
+df3 <- df3 %>%
+  mutate(Ticker = toupper(Ticker))
+common_tickers <- Reduce(intersect, list(df1_clean$Ticker, df2$Ticker, df3$Ticker))
+df1_filtered <- df1_clean %>%
+  filter(Ticker %in% common_tickers)
+
+df2_filtered <- df2 %>%
+  filter(Ticker %in% common_tickers)
+
+df3_filtered <- df3 %>%
+  filter(Ticker %in% common_tickers)
+merged <- df1_filtered %>%
+  inner_join(df2_filtered, by = "Ticker") %>%
+  inner_join(df3_filtered, by = "Ticker")
+merged <- merged %>%
+  mutate(
+    total_words_filing = as.numeric(total_words),
+    total_words_news = as.numeric(TotalWords),
+    total_words_sum = total_words_filing + total_words_news
+  )
+keyword_cols <- c("climate","emissions","carbon","environment","renewable","water usage","pollution","sustainable","biodiversity","waste management","oil","green","diversity","inclusion","social","ethics","human rights","equity","controversy","shareholder rights","community",
+"fast fashion","reuse","recycle","donate","governance","compliance","executive compensation","hierarchy")
+for (col in keyword_cols) {
+  merged[[paste0(col, "_density")]] <- as.numeric(merged[[paste0(col, ".x")]]) + as.numeric(merged[[paste0(col, ".y")]])
+}
+final_cols <- c("Ticker", "total_words_sum", paste0(keyword_cols, "_density"))
+
+text_data <- merged %>%
+  select(all_of(final_cols)) %>%
+  filter(complete.cases(.))
+print("Text data dimensions:")
+dim(text_data)
+```
+
+
+```{r, echo=FALSE}
+scale_factor <- 10000
+word_columns <- text_data %>%
+  dplyr::select(-Ticker) %>%
+  colnames()
+
+text_data <- text_data %>%
+  mutate(across(
+    all_of(word_columns),
+    ~ as.numeric(.) / total_words_sum * scale_factor
+  )) %>%
+  dplyr::select(-total_words_sum)
+```
+
+### Financial Data:
+
+I also obtained a financial summary of each of the companies from Alpha Vantage. This includes financial metrics about the stock as investors would find them on platforms such as Bloomberg or Yahoo Finance, giving information on earnings, share price, company size (market cap), how they treat shareholders (dividend information) and perceived risk (Beta). I acquired a snapshot of this data (at the beginning of April). Although some of the data in these summaries is volatile, for example stock price changes several times a day, my main purpose in collecting this data was to get some fundamental information on the company’s financial performance. Many metrics such as market capitalisation, analyst sentiment and beta remain more or less constant over periods of several months or years, so the use of an instantaneous snapshot of such data, when combined with the company’s most recent text filings, is plausible. I also engineered some of the more volatile variables, as well as those with a large proportion of missing values as shown below, to generalize the information they hold, which I will go into more detail on in my approach section.
+
+```{r, echo=FALSE}
+fin_data_raw <- read.csv("alpha_vantage_fundamentals.csv")
+#Removing useless columns eg. dates, website, address
+#Also remove sector and industry because scores are industry adjusted
+cols_to_remove <- c("AssetType", "Name", "Description", "CIK", "Exchange", "Currency", "Address", "OfficialSite", "FiscalYearEnd", "LatestQuarter", "DividendDate", "ExDividendDate", "Sector", "Industry")
+fin_data_raw <- fin_data_raw %>%
+  dplyr::select(-all_of(cols_to_remove)) %>%
+  mutate(across(
+    .cols = -c(Symbol, Country),
+    .fns = ~ . %>%
+      as.character() %>%   
+      na_if("None") %>%    
+      na_if("-") %>%       
+      as.numeric()         
+  ))
+check_NA <- fin_data_raw %>% dplyr::select(-Symbol, -Country)
+mean(!complete.cases(check_NA))
+missing_proportions <- colSums(is.na(check_NA)) / nrow(check_NA)
+print("Financial data dimensions:")
+dim(fin_data_raw)
+print("Proportion of missing values in each column:")
+print(missing_proportions)
+```
+
+```{r, echo=FALSE}
+cols_to_remove <- c("PEGRatio", "ForwardPE", "TrailingPE", 
+                    "EVToEBITDA", "EVToRevenue", "AnalystTargetPrice",
+                    "PriceToSalesRatioTTM", "PERatio", "EPS")
+fin_data_clean <- fin_data_raw %>%
+  dplyr::select(-all_of(cols_to_remove))
+#Dummy variable for PE ratio
+fin_data_clean <- fin_data_clean %>%
+  mutate(PERatio_missing = if_else(is.na(fin_data_raw$PERatio), 1, 0))
+#Analyst ratings replaced with mean
+analyst_cols <- c("AnalystRatingStrongBuy", "AnalystRatingBuy", 
+                  "AnalystRatingHold", "AnalystRatingSell", 
+                  "AnalystRatingStrongSell")
+for (col in analyst_cols) {
+  mean_value <- mean(fin_data_clean[[col]], na.rm = TRUE)
+  fin_data_clean[[col]][is.na(fin_data_clean[[col]])] <- mean_value
+}
+#KNN Imputation
+cols_to_impute <- c("MarketCapitalization", "EBITDA", "BookValue", "Beta")
+impute_subset <- fin_data_clean %>%
+  dplyr::select(all_of(cols_to_impute))
+imputed_subset <- kNN(impute_subset, k = 10)
+for (col in cols_to_impute) {
+  na_indices <- which(is.na(fin_data_clean[[col]]))
+  if (length(na_indices) > 0) {
+    fin_data_clean[na_indices, col] <- imputed_subset[na_indices, col]
+  }
+}
+#Missing DPS and DY set to 0
+fin_data_clean <- fin_data_clean %>%
+  mutate(
+    DividendPerShare = if_else(is.na(DividendPerShare), 0, DividendPerShare),
+    DividendYield = if_else(is.na(DividendYield), 0, DividendYield)
+  )
+#Missing PB estimated
+fin_data_clean <- fin_data_clean %>%
+  mutate(
+    PriceToBookRatio = if_else(is.na(PriceToBookRatio),
+                               X50DayMovingAverage / BookValue,
+                               PriceToBookRatio)
+  )
+fin_data <- fin_data_clean
+missing_proportions_final <- colSums(is.na(fin_data_clean)) / nrow(fin_data)
+```
+
+```{r, echo=FALSE}
+df <- text_data %>%
+  inner_join(fin_data, by = c("Ticker" = "Symbol")) 
+df$Country_numeric <- recode(df$Country, "USA" = 1, "China" = 2)
+df <- df %>%
+  dplyr::select(-Country)
+```
+
+```{r, echo=FALSE}
+esg_ratings_raw <- read.csv("esg_ratings_factors.csv")
+esg_controversy_raw <- read.csv("controversy_factors.csv")
+esg_ratings <- esg_ratings_raw %>%
+  distinct(ISSUER_TICKER, .keep_all = TRUE)
+esg_controversy <- esg_controversy_raw %>%
+  distinct(ISSUER_TICKER, .keep_all = TRUE)
+esg_data <- esg_ratings %>%
+  inner_join(esg_controversy, by = "ISSUER_TICKER") %>%
+  dplyr::select(ISSUER_TICKER, IVA_COMPANY_RATING, INDUSTRY_ADJUSTED_SCORE, GOVERNANCE_SCORE, OVERALL_FLAG)
+rating_levels <- c("CCC", "B", "BB", "BBB", "A", "AA", "AAA")
+flag_levels <- c("Red", "Orange", "Yellow", "Green")
+esg_data <- esg_data %>%
+  mutate(
+    IVA_COMPANY_RATING = match(IVA_COMPANY_RATING, rating_levels),
+    OVERALL_FLAG = match(OVERALL_FLAG, flag_levels)
+  )
+esg_data <- esg_data %>%
+  dplyr::select(-ends_with("_NUM"))
+```
+
+Final predictors = word densities + financial summary data
+
+Final target variable = Industry Adjusted ESG Score (then mapped into letter ratings)
+
+
+```{r, echo=FALSE}
+data <- df %>%
+  inner_join(esg_data, by = c("Ticker" = "ISSUER_TICKER"))
+data <- data[complete.cases(data), ]
+target_vars <- data %>%
+  dplyr::select(c(IVA_COMPANY_RATING, INDUSTRY_ADJUSTED_SCORE,
+                  GOVERNANCE_SCORE, OVERALL_FLAG))
+predictors <- data %>%
+  dplyr::select(-all_of(colnames(target_vars)), -Ticker)
+predictors_scaled <- predictors %>%
+  scale()
+predictors_scaled <- as.data.frame(scale(predictors))
+print("Final predictors dimension:")
+dim(predictors_scaled)
+print("Final target variables dimension:")
+dim(target_vars)
+print("Final dataset:")
+head(data)
+```
+
+```{r, echo=FALSE}
+final_tickers <- data$Ticker %>% unique()
+text_predictors <- text_data %>%
+  filter(Ticker %in% final_tickers) %>%
+  arrange(match(Ticker, final_tickers))  
+text_predictors <- text_predictors %>%
+  dplyr::select(-Ticker)
+```
+
+# Findings Summary
+
+Overall, the models I implemented had weak predictive power, which I will go into more depth on later in the report. The main insight is that there is limited signal to be derived from public document mentions of ESG related topics and a company’s financial and fundamental data in predicting MSCI ESG scores. This is demonstrated by the below t-sne plot, which maps points based on similarity across all of the predictor variables used in my model. The even distribution of broad ESG scores (Leader, Average, Laggard) indicated by the somewhat uniform scattering of different coloured points across the similarity map tells us that using this public information to distinguish different ESG ratings is ineffective. The methodology behind MSCI ESG scores therefore remains unclear to external observers, and it is likely that MSCI and other rating organisations have access to information that the standard investor does not, which helps them to form more comprehensive measures of ESG risk for different investments.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+par(mfrow = c(1, 2))
+#Plotting to demonstrate lack of signal
+library(Rtsne)
+set.seed(123)
+tsne_result <- Rtsne(predictors_scaled, dims = 2, perplexity = 30, verbose = TRUE, max_iter = 500)
+
+tsne_data <- data.frame(
+  X = tsne_result$Y[, 1],
+  Y = tsne_result$Y[, 2],
+  IVA_COMPANY_RATING = data$IVA_COMPANY_RATING,
+  OVERALL_FLAG = data$OVERALL_FLAG
+)
+tsne_data <- tsne_data %>%
+  mutate(
+    Rating_Group = case_when(
+      IVA_COMPANY_RATING %in% c(1, 2) ~ "Laggard",
+      IVA_COMPANY_RATING %in% c(3, 4, 5) ~ "Average",
+      IVA_COMPANY_RATING %in% c(6, 7) ~ "Leader"
+    ),
+    Flag_Label = factor(OVERALL_FLAG, levels = 1:4, labels = c("Red", "Orange", "Yellow", "Green"))
+  )
+library(ggplot2)
+
+ggplot(tsne_data, aes(x = X, y = Y, color = Rating_Group)) +
+  geom_point(alpha = 0.7, size = 2) +
+  scale_color_manual(values = c("Laggard" = "red", "Average" = "yellow", "Leader" = "green")) +
+  theme_minimal() +
+  labs(title = "t-SNE: ESG Rating Group (Laggard, Average, Leader)", color = "ESG Group")
+par(mfrow = c(1, 1))
+```
+
+# Approach
+
+## Initial Hypothesis
+
+The intuition behind my approach is that if MSCI scores are formed from public information, it should be possible to infer a company’s ESG risk from a) the things the company discloses, ie. The mention of ESG-related words in official filings and b) certain aspects of fundamental stock data on growth, earnings and valuation. Otherwise, this would suggest that MSCI may incorporate private and undisclosed information sources, possibly via third party environmental agencies or from company executives. I suspected word densities would play a big role in predictive power, as well as certain financial metrics, for example market capitalization measures a company’s size and hence its robustness to ESG risks, growth rates may be higher for ESG-friendly companies due to increased interest in investing in such companies, and I guessed that beta, the measure of a company’s overall risk would somewhat correlate to its ESG risk. Regardless, I included all of the complete financial data available and allowed the models to decide which were most relevant for prediction.
+
+## Data Cleaning and Engineering
+
+As I was combining predictors from several different sources, a great deal of cleaning was required to ensure consistency. I implemented the following procedures before training any models on my data. I removed any tickers that did not have any available 10-K or 20-F SEC filing. In the financial dataset, I checked the proportions of each column that had missing values before deciding how best to handle missing values based on the nature of each variable and missingness pattern. I used a different method for different columns, depending on the proportion that’s missing and the nature of the data in each column:
+
+-	I fully removed stock names, descriptions, dates, industry (as ESG scores are industry adjusted), TrailingPE, ForwardPE, PEG (no need for all these when we have PE ratio), EVToEbidta and EVToRevenue (too many missing values and couldn’t estimate because EV not available), EPS (too many missing values and Net Income not available for estimation), PriceToSalesRatioTTM (similar to PriceToBook so don’t need both), AnalystTargetPrice (analyst targets are very specific estimates that introduce subjective noise).
+
+-	PE ratio had many missing values, likely due to the presence of invalid ratios of 0 or less. However, the fact that the ratio is missing carries meaning in itself, so I replaced the PE ratio column with a dummy variable encoded 1 if the ratio is missing and 0 if not. This also mitigates the concern of the instantaneous snapshot being unsuitable because although the PE ratio may change frequently, movement from unavailable ratio to available requires greater adjustment, so this dummy variable gives a longer term view.
+
+-	Engineered ‘Country’ into a numerical variable, as there may be differing ESG standards in different countries. Most of the stocks are based in the USA as they are listed on US stock exchanges, with some others based in China
+
+-	Replaced missing values in Analyst Ratings columns to the mean of the column, indicating that if analyst rating is missing there is likely neutral sentiment towards the stock
+
+-	A small amount of data was missing from the important variables Market Cap, EBITDA, Book Value and Beta (<20%), so I used k nearest neighbours imputation to estimate the missing values as best as possible 
+
+-	Large proportion (>60%) of data was missing from Dividend per Share and Dividend Yield, but this is likely because the companies with missing values don’t pay a dividend at all. I therefore set missing values for these columns to 0
+
+-	I estimated missing values for Price to Book Ratio by calculating it explicitly using the row values that were available: PriceToBook = 50DayMovingAverage/Book Value (50 day moving average is an estimate of share price). The 50-day moving average is only an estimate of market price, so strong signals derived from estimates of this variable if found, will be treated with caution
+
+These adjustments provided a complete dataset of financial summary statistics. I was then able to merge this data with the text data and MSCI scores data, keeping only tickers that were common across all three datasets, to create a final dataset of 59 predictors and 4 target variables. The number of rows was almost halved from the initial set of tickers I used, from above 5600 to only 2644 in the final dataset, as these were the only tickers that were common across all of the datasets. Before inputting the predictors into any models I scaled each of the columns due to magnitude and unit differences.
+
+## Summary of Models
+1.	Early Signal Detection: Linear Regression Model predicting ESG scores solely on the presence of the words ‘environment’, ‘social’ and ‘governance’ in public documents
+
+2.	(2.1) Ridge and Lasso model on full set of predictors with hyperparameter tuning to predict Industry Adjusted Letter Rating and (2.2) Random Forest model on full set of predictors to predict Industry Adjusted Letter Rating
+
+-	Models trained on the precise numeric Industry Adjusted Scores 
+
+-	Categorised into Letter Rating based on the mapping provided by MSCI
+
+-	Correct Classification rate determined from those mappings and the explicit letter rating given by MSCI
+
+3.	Exploratory Data Analysis: K-Means Clustering on all predictors followed by analysis of the proportions of Letter Ratings and Controversy Flags across each of the clusters
+
+## Justification of approach
+
+Isolation of information that is publicly available to investors effectively addresses the question of transparency because if ESG scores are derived mostly from information that can only be accessed privately, this could propagate scepticism among investors. The data I use to build my models spans over a diverse range of public information on stocks. It covers ESG mentions in the company’s own words via annual reports and earnings call transcripts, in others’ words via news report headlines and summaries, as well as objective summaries of the company’s size, financial health and performance. I ran both regularised regression and random forest algorithms to account for the possibility of both linear and non-linear relationships between my chosen predictors and the ESG scores. Given the large number of variables, I knew many of them would not be useful in predicting at all, for example some words may not appear in any documents and many financial performance metrics are independent of ESG factors. The use of Ridge and Lasso enabled redundant variables to be shrunk and the optimal model to be found through the tuning of hyperparameters lambda and alpha. Training the model to predict the specific continuous Industry Adjusted Scores rather than ordinal letter scorings ensured stricter and more precise training before classifying the predicted scores into categories afterwards. Running random forest addressed the possibility that non-linear relations exist between the predictor variables and ESG scores. Finally, while the K-Means clustering algorithm in my final cannot be used for explicit prediction, it gives valuable insight on the structure of the data and the way different ESG rating labels are distributed across points that are similar. If anything, the distributions in the clusters verify the lack of predictive signal in the chosen data, thus confirming the inherent ambiguity in MSCI ratings. 
+
+# Model Specification and Performance Summary
+
+## Model 1 – Linear Regression predicting Industry Adjusted Score from word densities of ‘environment’, ‘social’ and ‘governance’
+
+### Specification
+
+Trained model on the full data using 10-fold cross-validation. Performance compared to that of a baseline naïve model which consistently predicts the mean Industry Adjusted Score.
+
+### Result
+
+Improvement in RMSE from the naive model to the lienar regression model was ~0.02 rating points (improvement of just over 1%), with an R^2 statistic indicating only 2.5% of the data’s variability was explained by the model. This indicates virtually no signal from the predictors in estimating ESG rating. This model was my ‘dumb but reasonable’ model. Because its prediction power is weak, it seems reasonable to continue implementing more complex machine learning algorithms on the data to derive more meaningful predictions and insights.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#Dumb but reasonable approach - just use 'environment', 'social' and 'governance' keyword densities to predict
+esg_densities <- text_predictors %>%
+  select(c(environment_density, social_density, governance_density))
+
+set.seed(123)
+results <- data.frame(Target = character(),
+                      Linear_RMSE = numeric(),
+                      Naive_RMSE = numeric(),
+                      Improvement = numeric(),
+                      Percentage_Improvement = numeric(),
+                      Rsquared = numeric(),
+                      stringsAsFactors = FALSE)
+
+  target <- target_vars[[2]]
+  data_full <- cbind(target, esg_densities)
+  colnames(data_full)[1] <- "target"
+  
+  ctrl <- trainControl(method = "cv", number = 10)
+  model <- train(target ~ ., data = data_full,
+                 method = "lm",
+                 trControl = ctrl)
+  lin_rmse <- model$results$RMSE
+  r2 <- model$results$Rsquared
+  naive_pred <- rep(mean(data_full$target), nrow(data_full))
+  naive_rmse <- RMSE(naive_pred, data_full$target)
+  results <- rbind(results,
+                   data.frame(Target = "industry_adjusted_score",
+                              Linear_RMSE = lin_rmse,
+                              Naive_RMSE = naive_rmse,
+                              Improvement = naive_rmse - lin_rmse,
+                              Percentage_Improvement = (naive_rmse - lin_rmse)/naive_rmse * 100,
+                              Rsquared = r2))
+results_long <- results %>%
+  pivot_longer(
+    cols = -c(Target),
+    names_to = "Metric",
+    values_to = "Value"
+  )
+knitr::kable(results_long, digits = 3, caption = "Linear Regression on 'ESG' Densities Model Summary")
+```
+
+
+```{r, echo=FALSE}
+#Function to map scores into categories
+map_score_to_category <- function(score) {
+  if (score >= 8.571) {
+    return(7)  # AAA
+  } else if (score >= 7.143) {
+    return(6)  # AA
+  } else if (score >= 5.714) {
+    return(5)  # A
+  } else if (score >= 4.286) {
+    return(4)  # BBB
+  } else if (score >= 2.857) {
+    return(3)  # BB
+  } else if (score >= 1.429) {
+    return(2)  # B
+  } else {
+    return(1)  # CCC
+  }
+}
+```
+
+## Model 2.1 – Regularized Regression Model to Predict Industry Adjusted Score and Letter Rating
+
+### Specification
+
+Used 80% of the data to train the model using 10-fold cross validation to find optimal model (Ridge/Lasso/Mix of Ridge and Lasso) and optimal hyperparameters (alpha and lambda) for that model. Used the remaining 20% was used as a holdout set to test the model’s performance on unseen data, comparing to a naïve baseline model’s performance as in the linear regression analysis. Optimal model found by hyperparameter tuning is a mixed elastic net model with an alpha of 0.25 and a lambda of 0.1. This is a mild penalty but is leaned more towards a Ridge approach (alpha 75% indicating Ridge/Lasso proportions in the Elastic Net model) of shrinking coefficients without dropping them entirely. This indicates that each of the predictor variables add some sort of value to the in-sample fit as the model did not find as much value from dropping variables altogether.
+
+### Result
+
+The linear model’s RMSE is a modest 6.37% improvement from that of the naïve model, and the R^2 is much improved from the initial regression model, indicating that the model explains about 12.5% of the data’s variability (compared to 0 for the naïve model’s R^2). The accuracy of the scores when classified into broader letter groups is somewhat better than the naïve model’s classification, with a correct classification rate of almost 28%. However, despite this improvement, the overall classification performance remains weak, especially given that the task involves only seven possible categories.
+
+```{r, echo=FALSE}
+#Ridge and lasso on full data
+set.seed(123)
+ctrl <- trainControl(method = "cv", number = 10)
+ridge_lasso_elastic_grid <- expand.grid(
+  alpha = c(0, 0.25, 0.5, 0.75, 1),
+  lambda = c(0.001, 0.01, 0.1, 1, 10)
+)
+y <- target_vars[[2]] #Train on exact scores 
+true_ratings <- target_vars[[1]] #Test on letter ratings 
+cat("\nRunning Ridge/Lasso/Mixed for target: industry_adjusted_score\n")
+model <- train(
+  x = predictors_scaled,
+  y = y,
+  method = "glmnet",
+  trControl = ctrl,
+  tuneGrid = ridge_lasso_elastic_grid
+)
+best_alpha <- model$bestTune$alpha
+best_lambda <- model$bestTune$lambda
+model_type <- if (best_alpha == 0) {
+  "Ridge"
+} else if (best_alpha == 1) {
+  "Lasso"
+} else {
+  "Mixed"
+}
+
+model_rmse <- model$results %>%
+  filter(alpha == best_alpha, lambda == best_lambda) %>%
+  pull(RMSE)
+naive_pred <- rep(mean(y, na.rm = TRUE), length(y))
+naive_rmse <- RMSE(naive_pred, y)
+improvement <- naive_rmse - model_rmse
+percentage_improvement <- improvement / naive_rmse * 100
+r2 <- model$results %>%
+  filter(alpha == best_alpha, lambda == best_lambda) %>%
+  pull(Rsquared)
+predicted_scores <- predict(model, predictors_scaled)
+predicted_categories <- sapply(predicted_scores, map_score_to_category)
+classification_accuracy <- mean(predicted_categories == true_ratings, na.rm = TRUE)
+most_common_class <- as.numeric(names(sort(table(true_ratings), decreasing = TRUE)[1]))
+naive_class_pred <- rep(most_common_class, length(true_ratings))
+naive_class_accuracy <- mean(naive_class_pred == true_ratings, na.rm = TRUE)
+results_df <- data.frame(
+  Target = "industry_adjusted_score",
+  Model_Type = model_type,
+  Best_Alpha = best_alpha,
+  Best_Lambda = best_lambda,
+  RMSE = model_rmse,
+  Naive_RMSE = naive_rmse,
+  Improvement = improvement,
+  Percentage_Improvement = percentage_improvement,
+  Rsquared = r2,
+  Classification_Accuracy = classification_accuracy * 100, 
+  Naive_Classification_Accuracy = naive_class_accuracy * 100
+)
+results_long <- results_df %>%
+  pivot_longer(
+    cols = -c(Target, Model_Type),
+    names_to = "Metric",
+    values_to = "Value"
+  )
+knitr::kable(results_long, digits = 3, caption = "Regularized Regression Model Summary")
+best_coefs <- coef(model$finalModel, s = best_lambda)
+coef_df <- as.data.frame(as.matrix(best_coefs))
+coef_df$predictor <- rownames(coef_df)
+colnames(coef_df)[1] <- "coefficient"
+rownames(coef_df) <- NULL
+coef_df <- coef_df %>%
+  arrange(desc(abs(coefficient)))
+kable(head(coef_df, 10), digits = 4, caption = "Top Coefficients for industry_adjusted_score")
+```
+
+## Model 2.2 – Random Forest Model to Predict Industry Adjusted Score and Letter Rating
+
+### Specification
+
+Model trained on 80% of the data with 10-fold cross validation to decide the optimal number of variables to be included at each split. I tried all even numbers from 2 to 18 as hyperparameters and the chosen number of variables to be included at each split to make the model optimal was 12. I then tested on the remaining 20% of unseen data, and like the previous models, compared results to a naïve baseline that estimates all scores as the mean.
+
+### Result
+
+Correct classification better than the regularized regression model, with 31% of companies’ ESG letter ratings correctly predicted by the random forest model.
+
+
+```{r, echo=FALSE}
+colnames(predictors_scaled) <- gsub(" ", "_", colnames(predictors_scaled))
+set.seed(123)
+train_indices <- createDataPartition(1:nrow(predictors_scaled), p = 0.8, list = FALSE)
+train_x <- predictors_scaled[train_indices, ]
+test_x <- predictors_scaled[-train_indices, ]
+train_y <- target_vars[train_indices, 2][[1]]
+test_y <- target_vars[-train_indices, 2][[1]]
+true_ratings <- target_vars[-train_indices, 1][[1]]
+control <- trainControl(method = "cv", number = 10)
+tunegrid <- expand.grid(mtry = c(2, 4, 6, 8, 10, 12, 14, 16, 18))
+train_data <- data.frame(train_x, target = train_y)
+rf_model <- train(
+  target ~ .,
+  data = train_data,
+  method = "rf",
+  trControl = control,
+  tuneGrid = tunegrid
+)
+
+best_mtry <- rf_model$bestTune$mtry
+preds <- predict(rf_model, newdata = test_x)
+rf_rmse <- sqrt(mean((preds - test_y)^2))
+naive_pred <- mean(train_y)
+naive_rmse <- sqrt(mean((naive_pred - test_y)^2))
+improvement <- naive_rmse - rf_rmse
+perc_improvement <- (improvement / naive_rmse) * 100
+oob_r2 <- rf_model$finalModel$rsq[best_mtry]
+predicted_categories <- sapply(preds, map_score_to_category)
+class_accuracy <- mean(predicted_categories == true_ratings, na.rm = TRUE) * 100
+mean_score <- mean(train_y, na.rm = TRUE)  
+naive_class <- map_score_to_category(mean_score)  
+naive_class_pred <- rep(naive_class, length(true_ratings))
+naive_class_accuracy <- mean(naive_class_pred == true_ratings, na.rm = TRUE) * 100
+summary_results <- data.frame(
+  Target = "industry_adjusted_score",
+  Best_mtry = best_mtry,
+  RF_RMSE = rf_rmse,
+  Naive_RMSE = naive_rmse,
+  Improvement = improvement,
+  Percentage_Improvement = perc_improvement,
+  OOB_Rsquared = oob_r2,
+  Classification_Accuracy = class_accuracy,
+  Naive_Classification_Accuracy = naive_class_accuracy,
+  stringsAsFactors = FALSE
+)
+results_long <- summary_results %>%
+  pivot_longer(
+    cols = -c(Target),
+    names_to = "Metric",
+    values_to = "Value"
+  )
+knitr::kable(results_long, digits = 3, caption = "Random Forest Model Summary")
+importance <- varImp(rf_model, scale = TRUE)$importance
+importance_df <- data.frame(
+  predictor = rownames(importance),
+  importance = importance$Overall
+)
+importance_df <- importance_df %>%
+  arrange(desc(importance)) 
+knitr::kable(head(importance_df, 10), digits = 4, caption = "Top Varaibles of Importance for industry_adjusted_score")
+```
+## Model 3: Exploratory Data Analysis using K-Means Clustering
+
+The purpose of this is to confirm the lack of signal in the data for predicting ESG rating groups. Before performing the clustering, I reduced the dimensions of the predictor variables using PCA as clustering is more effective in fewer dimensions. I then carried out k-means clustering on the dimension reduced predictors, with k=3 (since there are three labels for the data). Once clusters had been formed, I compared the distributions of data points in each cluster over 1) the three broad ESG ratings (Leader, Average and Laggard) and 2) the ESG controversy flags; to see if distributions of both categorical ESG measures in the clusters differ from the distribution of the overall data, which would indicate that some of the common characteristics on which cluster membership was built also define the distinction between ESG groups. However, for both ESG ratings and controversy flags, the within-cluster distributions of ESG ratings and controversy flags were nearly identical to those of the overall population, thus confirming that the predictors of the previous have little power in distinguishing between ESG ratings. A small signal detection is that cluster 2 for the ESG ratings is 100% Average ratings, meaning it may be possible for the data to distinguish between stocks with extreme scores vs those with common ones, but on the other hand the distribution in cluster 3 is almost identical to that of the population. Likewise for the controversy flags, 100% of the points in cluster 2 are labelled green, the most common controversy flag, while the distribution of cluster 3 follows that of the full dataset. 
+
+Note the most common ESG risk rating group is 'Average' and the most common controversy flag is 'Green'.
+
+```{r, echo=FALSE}
+#Distributions of ratings and flags
+data_summary <- data %>%
+  mutate(
+    Rating_Group = case_when(
+      IVA_COMPANY_RATING %in% c(1, 2) ~ "Laggard",
+      IVA_COMPANY_RATING %in% c(3, 4, 5) ~ "Average",
+      IVA_COMPANY_RATING %in% c(6, 7) ~ "Leader"
+    ),
+    Flag_Label = factor(OVERALL_FLAG, levels = 1:4, labels = c("Red", "Orange", "Yellow", "Green"))
+  )
+overall_rating_summary <- data_summary %>%
+  group_by(Rating_Group) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  mutate(Proportion = Count / sum(Count))
+knitr::kable(
+  overall_rating_summary,
+  digits = 3,
+  caption = "Distribution of Companies by ESG Rating Group"
+)
+overall_flag_summary <- data_summary %>%
+  group_by(Flag_Label) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  mutate(Proportion = Count / sum(Count))
+knitr::kable(
+  overall_flag_summary,
+  digits = 3,
+  caption = "Distribution of Companies by ESG Controversy Flag"
+)
+```
+
+
+```{r, echo=FALSE}
+#K-means clustering on dimension reduced data
+pca_result <- prcomp(predictors_scaled, center = TRUE, scale. = TRUE)
+explained_variance <- summary(pca_result)$importance[3, ]
+num_pcs <- which(explained_variance >= 0.90)[1] 
+pca_scores <- pca_result$x[, 1:num_pcs]
+set.seed(123)
+kmeans_result <- kmeans(pca_scores, centers = 3, nstart = 25)
+cluster_assignments <- kmeans_result$cluster
+cluster_data <- data.frame(
+  Cluster = factor(cluster_assignments),
+  IVA_COMPANY_RATING = data$IVA_COMPANY_RATING,
+  OVERALL_FLAG = data$OVERALL_FLAG
+)
+cluster_data <- cluster_data %>%
+  mutate(
+    Rating_Group = case_when(
+      IVA_COMPANY_RATING %in% c(1, 2) ~ "Laggard",   
+      IVA_COMPANY_RATING %in% c(3, 4, 5) ~ "Average",   
+      IVA_COMPANY_RATING %in% c(6, 7) ~ "Leader"     
+    ),
+    Flag_Label = factor(OVERALL_FLAG, levels = 1:4, labels = c("Red", "Orange", "Yellow", "Green"))
+  )
+rating_summary <- cluster_data %>%
+  group_by(Cluster, Rating_Group) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(Cluster) %>%
+  mutate(Proportion = Count / sum(Count))
+knitr::kable(
+  rating_summary,
+  digits = 3,
+  caption = "Distribution of ESG Rating Groups across Clusters"
+)
+flag_summary <- cluster_data %>%
+  group_by(Cluster, Flag_Label) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(Cluster) %>%
+  mutate(Proportion = Count / sum(Count))
+knitr::kable(
+  flag_summary,
+  digits = 3,
+  caption = "Distribution of ESG Controversy Flags across Clusters"
+)
+```
+
+## Analysis of Top Coefficients / Predictors
+
+In the regularized regression model, the top ten predictors included three analyst rating scores (causation discussed in risk section). The dummy variable PE_missing had a significant negative coefficient, suggesting that companies with missing or negative P/E ratios are perceived as higher risk which correlates with lower ESG risk ratings. The direction of causality is unclear, as it could be that lower ESG ratings (riskier companies with low or negative earnings) lead to missing PE ratios rather than the other way around. Return on assets is positively correlated with ESG score, this is intuitive as companies with a high return on assets are using their resources effectively and sustainably, which would give them a better ESG rating. All other important predictors are word densities, and these move in intuitive directions: mentions of inclusion and environment increase ESG rating while mentions of oil decrease scores.
+
+Predictors with the highest importance found by the random forest model are more focused on company size and earnings. Absolute measures of revenue and profitability, as well as market capitalization were important in predicting ESG score. Intuitively, I expected that there would be somewhat of a positive relationship between ESG scores and these absolute measures, as larger companies with higher revenues are more able to invest in ESG practices. To investigate this, I created partial dependence plots for RevenueTTM and Market Cap, which revealed that the decision-making process was more binary than expected. Intuitively, it would make sense that ESG scores would increase gradually as market cap and earnings increase due to reduced risk from robustness. Companies with zero revenue are predicted to have lower ESG score, but once revenue exists ESG score predictions are unaffected by revenue level. A slight linear pattern is indicated by the Market Cap plot. Like revenue, market cap of 0 gives a lower ESG score (means the company is failing). After a jump in ESG score following the existence of market cap, there is then a slightly downward sloping pattern indicating that smaller cap companies are mildly favoured when it comes to ESG scoring. Two word density predictor variables were seen as important for the random forest model: environment and governance. It’s more than likely that higher densities of these lead to higher ESG score predictions.
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow=c(1, 2))
+pdp_revenue <- partial(
+  object = rf_model,
+  pred.var = "RevenueTTM",
+  train = train_data,
+  grid.resolution = 20
+)
+pdp_revenue_df <- as.data.frame(pdp_revenue)
+
+ggplot(pdp_revenue_df, aes(x = RevenueTTM, y = yhat)) +
+  geom_line(color = "#0072B2", size = 1.2) +
+  geom_point(color = "#0072B2", size = 2) +
+  labs(
+    title = "Partial Dependence of ESG Score on RevenueTTM",
+    x = "RevenueTTM",
+    y = "Predicted ESG Score"
+  ) +
+  theme_minimal(base_size = 14)
+
+pdp_mcap <- partial(
+  object = rf_model,
+  pred.var = "MarketCapitalization",
+  train = train_data,
+  grid.resolution = 20
+)
+pdp_mcap_df <- as.data.frame(pdp_mcap)
+
+ggplot(pdp_mcap_df, aes(x = MarketCapitalization, y = yhat)) +
+  geom_line(color = "#D55E00", size = 1.2) +
+  geom_point(color = "#D55E00", size = 2) +
+  labs(
+    title = "Partial Dependence of ESG Score on Market Capitalization",
+    x = "Market Capitalization",
+    y = "Predicted ESG Score"
+  ) +
+  theme_minimal(base_size = 14)
+par(mfrow=c(1, 1))
+```
+
+
+# Limitations and Risk
+
+## Limitations
+
+There were many limitations to this project due to the availability and compatibility of data, as well as the subjectivity of variable choices. I will point out the main limitations I came across when conducting my analysis.
+
+-	The inconsistency in ticker availability across datasets meant that many intended stocks had to be removed, which significantly reduced the sample size (more than halved the original ticker set). To include all of the predictor variables I needed, tickers had to be represented across multiple different datasets, with available ESG scores, 10-K/20-F, news data, earnings transcript and comprehensive financial data. Many stocks failed to provide all this information simultaneously, and therefore had to be removed from the analysis.
+
+-	Models’ predictive power may have been limited by subjectivity. The word density predictors were dependent on the words I chose as ‘ESG-relevant’. Although I chose the words carefully, through careful review of MSCI’s methodology and with the aim of thoroughly covering environmental, social and governance pillars, there is still a chance that another list of words could have higher predictive power than the ones I chose. The nature of the model, which obtains counts of a predefined list of words, prevents the identification words whose densities in public documents have unexpected predictive power in the ESG space, which limits its flexibility.
+
+## Risk
+
+When analysing the top 10 most important coefficients in my regularized regression model, I noticed that three of the coefficients are those of Analyst Rating variables (AnalystRatingHold, AnalystRatingBuy and AnalystRatingStrongSell). There is a risk that these are not suitable predictors, since the direction of causality in the relationship between ESG scores and analyst sentiment is ambiguous. The regression model claims that the fact that analysts want to hold or buy a stock means it is more likely to have a higher ESG score, when in reality, the relationship probably goes in the other direction. A higher MSCI ESG score, indicating lower ESG risk would make analysts favour holding or buying a stock. Another problem here is that the ratings ‘hold’, ‘buy’ and ‘strong sell’ all move in the same direction (positive coefficients), yet they suggest opposing sentiments. This inconsistency raises concerns that the model may be capturing noise rather than meaningful signals, as it's illogical that both bullish and bearish recommendations would be associated with higher ESG scores. The risk here is that the model that includes analyst ratings misrepresents the real predictive power of the model overall. To verify and mitigate this, I reran the model using the subset of predictors which excluded all analyst ratings. The results of the updated regularized regression are shown below.
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#Ridge and lasso on subset wihtout analyst ratings
+predictors_subset <- predictors_scaled %>%
+  select(-c(AnalystRatingBuy, AnalystRatingHold, AnalystRatingSell, AnalystRatingStrongBuy, AnalystRatingStrongSell))
+set.seed(123)
+ctrl <- trainControl(method = "cv", number = 10)
+ridge_lasso_elastic_grid <- expand.grid(
+  alpha = c(0, 0.25, 0.5, 0.75, 1),
+  lambda = c(0.001, 0.01, 0.1, 1, 10)
+)
+y <- target_vars[[2]]  
+true_ratings <- target_vars[[1]] 
+cat("\nRunning Ridge/Lasso/Mixed for target: industry_adjusted_score\n")
+
+model <- train(
+  x = predictors_subset,
+  y = y,
+  method = "glmnet",
+  trControl = ctrl,
+  tuneGrid = ridge_lasso_elastic_grid
+)
+best_alpha <- model$bestTune$alpha
+best_lambda <- model$bestTune$lambda
+model_type <- if (best_alpha == 0) {
+  "Ridge"
+} else if (best_alpha == 1) {
+  "Lasso"
+} else {
+  "Mixed"
+}
+
+model_rmse <- model$results %>%
+  filter(alpha == best_alpha, lambda == best_lambda) %>%
+  pull(RMSE)
+
+naive_pred <- rep(mean(y, na.rm = TRUE), length(y))
+naive_rmse <- RMSE(naive_pred, y)
+
+improvement <- naive_rmse - model_rmse
+percentage_improvement <- improvement / naive_rmse * 100
+
+r2 <- model$results %>%
+  filter(alpha == best_alpha, lambda == best_lambda) %>%
+  pull(Rsquared)
+predicted_scores <- predict(model, predictors_subset)
+predicted_categories <- sapply(predicted_scores, map_score_to_category)
+classification_accuracy <- mean(predicted_categories == true_ratings, na.rm = TRUE)
+most_common_class <- as.numeric(names(sort(table(true_ratings), decreasing = TRUE)[1]))
+naive_class_pred <- rep(most_common_class, length(true_ratings))
+naive_class_accuracy <- mean(naive_class_pred == true_ratings, na.rm = TRUE)
+results_df <- data.frame(
+  Target = "industry_adjusted_score",
+  Model_Type = model_type,
+  Best_Alpha = best_alpha,
+  Best_Lambda = best_lambda,
+  RMSE = model_rmse,
+  Naive_RMSE = naive_rmse,
+  Improvement = improvement,
+  Percentage_Improvement = percentage_improvement,
+  Rsquared = r2,
+  Classification_Accuracy = classification_accuracy * 100, 
+  Naive_Classification_Accuracy = naive_class_accuracy * 100    
+)
+results_long <- results_df %>%
+  pivot_longer(
+    cols = -c(Target, Model_Type),
+    names_to = "Metric",
+    values_to = "Value"
+  )
+knitr::kable(results_long, digits = 3, caption = "Regularized Regression Model on Subset Summary")
+best_coefs <- coef(model$finalModel, s = best_lambda)
+coef_df <- as.data.frame(as.matrix(best_coefs))
+coef_df$predictor <- rownames(coef_df)
+colnames(coef_df)[1] <- "coefficient"
+rownames(coef_df) <- NULL
+coef_df <- coef_df %>%
+  arrange(desc(abs(coefficient)))
+kable(head(coef_df, 10), digits = 4, caption = "Top Coefficients for industry_adjusted_score (exclusing Analyst Ratings)")
+```
+
+Performance on the test set is not dramatically inferior to that of the model that includes analyst ratings, and the correct classification rate drops only by a small amount to 27.4%. This mitigates concerns that the original model was completely distorted by the ambiguity of analyst rating predictors and allows us to isolate the other coefficients of importance with a clearer direction of causation.
+
+# Conclusion / Recommendation
+
+The overall conclusion of this project is that the model results were inconclusive. The regularized regression and random forest models indicated that the chosen data provided slightly stronger predictions than a naïve model that simply predicts mean scores, but certainly not enough that we can claim MSCI ESG scores can be accurately inferred from public information on a company. This is especially relevant because the so-called important predictors identified by each of the two models were different, which tells us there is no single correct way of using public data on companies to predict their ESG risk. That being said, the lack of conclusiveness from the ML models on this data, combined with the lack of differentiation detected in my exploratory data analyses and t-sne plot does give investors some sort of conclusion on how they should work with MSCI scores going forward. The fact that publicly disclosed information on companies is not enough to infer their ESG risk scores suggests that MSCI does have additional information sources on ESG practices which are not openly available to the public. This tells us a few things: firstly, that the scores are likely more objective than taking a company’s word and performance, and probably use more complex and unbiased information sources on factors such as emissions, labour practices and ethics to form ESG risk ratings. This mitigates investor concerns that MSCI scores are vulnerable to greenwashing, as the complexity of the scores must go beyond what a company tells the public about their ESG practices. In conclusion, while machine learning models failed to engineer transparency from MSCI ESG risk ratings, this in itself reveals something about the complexity of the scores that may allow investors to trust that they measure ESG risks beyond those which they can infer themselves, from company reports, news and financial data.  
