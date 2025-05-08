@@ -1,5 +1,5 @@
 MSCI ESG ratings dataset: Sourced from Columbia library in the database MSCI ESG Direct https://clio.columbia.edu/databases/10498319
-10K and 20F filings: Sourced from the US Securities and Exchange Commission database https://www.sec.gov/Archives/edgar/data/
+10K and 20F filings: Sourced (via scraping) from the US Securities and Exchange Commission database https://www.sec.gov/Archives/edgar/data/
 Stock tickers list: Nasdaq Trader symbol directory ftp://ftp.nasdaqtrader.com/SymbolDirectory/
 Financial data: Alpha Vantage Fundamental Data - Company Overview via API key https://www.alphavantage.co/documentation/
 Earnings call transcript: Alpha Vantage Alpha Intelligence - Earnings Call Transcript https://www.alphavantage.co/documentation/
